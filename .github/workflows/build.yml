@@ -1,0 +1,156 @@
+name: Build Linux Kernel (arm64)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  tags: [ '*' ]
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'Defconfig (without _defconfig suffix). اتركه فارغًا لاكتشاف تلقائي.'
+        required: false
+        default: ''
+      jobs:
+        description: 'عدد الـ jobs للبناء (-j)'
+        required: false
+        default: '4'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-arm64:
+    name: Build arm64 kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      KBUILD_BUILD_USER: github-actions
+      KBUILD_BUILD_HOST: runner
+
+    steps:
+      - name: استنساخ المستودع (checkout)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: تثبيت تبعيات البناء
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl device-tree-compiler flex \
+            g++-multilib gcc-multilib gnupg gperf \
+            lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python2-minimal python3 u-boot-tools
+
+      - name: تفعيل ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          max-size: 3G
+
+      - name: التحقق من سلسلة الأدوات المضمّنة
+        run: |
+          CLANG=$(pwd)/toolchain/clang/host/linux-x86/clang-r383902/bin/clang
+          GCC=$(pwd)/toolchain/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin/aarch64-linux-android-gcc
+          if [ ! -x "$CLANG" ]; then
+            echo "::error::لم يتم العثور على clang: $CLANG"
+            exit 1
+          fi
+          if [ ! -x "$GCC" ]; then
+            echo "::error::لم يتم العثور على aarch64-linux-android-gcc: $GCC"
+            exit 1
+          fi
+          $CLANG --version | head -n1
+          $GCC --version | head -n1
+
+      - name: اكتشاف ملف الـ defconfig
+        id: detect_defconfig
+        run: |
+          INPUT_DC="${{ inputs.defconfig }}"
+          if [ -n "$INPUT_DC" ] && [ "$INPUT_DC" != "defconfig" ]; then
+            DC="$INPUT_DC"
+          elif [ -f "arch/arm64/configs/defconfig" ]; then
+            DC="defconfig"
+          else
+            CFG=$(ls arch/arm64/configs/ 2>/dev/null | head -n1)
+            if [ -z "$CFG" ]; then
+              echo "::error::لا يوجد أي defconfig داخل arch/arm64/configs/"
+              exit 1
+            fi
+            DC="${CFG%_defconfig}"
+          fi
+          echo "DEFCONFIG=${DC}" >> "$GITHUB_OUTPUT"
+          echo "سيُستخدم defconfig: ${DC}_defconfig"
+
+      - name: ضبط إعدادات النواة (${{ steps.detect_defconfig.outputs.DEFCONFIG }}_defconfig)
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=$(pwd)/toolchain/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export CC=$(pwd)/toolchain/clang/host/linux-x86/clang-r383902/bin/clang
+          make -j"${{ inputs.jobs || '4' }}" ${{ steps.detect_defconfig.outputs.DEFCONFIG }}_defconfig
+
+      - name: بناء النواة
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=$(pwd)/toolchain/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export CC=$(pwd)/toolchain/clang/host/linux-x86/clang-r383902/bin/clang
+          ccache -s || true
+          JOBS=${{ inputs.jobs || '4' }}
+          echo "البناء بـ ${JOBS} jobs..."
+          make -j"${JOBS}"
+
+      - name: عرض مخرجات البناء
+        if: always()
+        run: |
+          echo "=== boot/ ==="
+          ls -lh arch/arm64/boot/ 2>/dev/null || true
+          echo "=== DTBs ==="
+          find arch/arm64/boot/dts -name '*.dtb' 2>/dev/null | head -n 20 || true
+          echo "=== الكيرنل الموقّع إن وُجد ==="
+          ls -lh arch/arm64/boot/Image* 2>/dev/null || true
+
+      - name: رفع صور الكيرنل (Artifacts)
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: kernel-arm64-images
+          path: |
+            arch/arm64/boot/Image
+            arch/arm64/boot/Image.gz
+            arch/arm64/boot/Image.bz2
+            arch/arm64/boot/Image.lz4
+            arch/arm64/boot/Image.lzma
+            arch/arm64/boot/Image.lzo
+            arch/arm64/boot/Image.zst
+          if-no-files-found: warn
+
+      - name: رفع الـ DTBs (Artifacts)
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: kernel-arm64-dtbs
+          path: arch/arm64/boot/dts/**/*.dtb
+          if-no-files-found: ignore
+
+      - name: رفع كامل مجلد boot (Artifacts)
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: kernel-arm64-boot
+          path: arch/arm64/boot/
+
+      - name: رفع .config النهائي (Artifacts)
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: kernel-arm64-config
+          path: .config
+          if-no-files-found: ignore

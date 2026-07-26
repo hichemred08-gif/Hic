@@ -1,0 +1,90 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: physwizz/E135-U-s5
+          ref: main
+          fetch-depth: 1
+
+      - name: Install build tools
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison flex libssl-dev \
+            libelf-dev gcc-aarch64-linux-gnu cpio zip
+
+      - name: Verify defconfig path
+        run: |
+          echo "== محتويات arch/arm64/configs =="
+          ls -la arch/arm64/configs/ || echo "المسار غير موجود"
+          echo "== بحث عام =="
+          find . -iname "*physwizz*defconfig*"
+
+      - name: Add KVM and Charger config
+        run: |
+          DEFCONFIG=$(find . -iname "physwizz_defconfig" | head -n1)
+
+          if [ -z "$DEFCONFIG" ]; then
+            echo "❌ لم يتم العثور على physwizz_defconfig"
+            find . -iname "*defconfig*"
+            exit 1
+          fi
+
+          echo "✅ تم العثور على: $DEFCONFIG"
+
+          sed -i '/CONFIG_VIRTUALIZATION=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_KVM=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_KVM_ARM_HOST=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_KVM_ARM_VGIC=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_KVM_ARM_VGIC_V3=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_ARM_GIC_V3=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_ARM_GIC_V3_ITS=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_ARM_GIC_V4=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_POWER_SUPPLY=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_CHARGER_SM5714=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_FUEL_GAUGE_SM5714=/d' "$DEFCONFIG"
+          sed -i '/CONFIG_BATTERY_SAMSUNG=/d' "$DEFCONFIG"
+
+          cat >> "$DEFCONFIG" <<EOF
+
+          CONFIG_VIRTUALIZATION=y
+          CONFIG_KVM=y
+          CONFIG_KVM_ARM_HOST=y
+          CONFIG_KVM_ARM_VGIC=y
+          CONFIG_KVM_ARM_VGIC_V3=y
+
+          CONFIG_ARM_GIC_V3=y
+          CONFIG_ARM_GIC_V3_ITS=y
+          CONFIG_ARM_GIC_V4=y
+
+          CONFIG_POWER_SUPPLY=y
+          CONFIG_CHARGER_SM5714=y
+          CONFIG_FUEL_GAUGE_SM5714=y
+          CONFIG_BATTERY_SAMSUNG=y
+          EOF
+
+      - name: Build kernel
+        run: |
+          export ARCH=arm64
+          export PLATFORM_VERSION=14
+          export ANDROID_MAJOR_VERSION=u
+
+          make ARCH=arm64 physwizz_defconfig
+          make ARCH=arm64 olddefconfig
+          make ARCH=arm64 -j$(nproc)
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: |
+            arch/arm64/boot/Image
+            arch/arm64/boot/Image.gz
